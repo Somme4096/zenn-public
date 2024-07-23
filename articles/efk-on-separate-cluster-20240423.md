@@ -1,5 +1,5 @@
 ---
-title: "Elastic Cloud on Kubernetes (ECK)でSaaSのアプリケーションログ監視環境を構築した話をなるべく詳しく話す"
+title: "Elastic Cloud on Kubernetes (ECK)でSaaSのアプリケーションログ監視環境を構築した話をなるべく詳しく書く"
 emoji: "🔭"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics: ["kubernetes","fluentd","elasticsearch","kibana"]
