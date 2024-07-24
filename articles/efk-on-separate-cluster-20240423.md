@@ -46,7 +46,7 @@ LKEを利用している場合、Dedicated 8GB以下のプランはリソース�
 :::
 
 ## 1.1 前提のインストール
-まずは公式ガイドを参考して、カスタムリソース(CRD)をインストールします。
+公式ガイドを参考にしてカスタムリソース(CRD)をインストールします。
 
 ```bash
 kubectl create -f https://download.elastic.co/downloads/eck/2.13.0/crds.yaml
@@ -61,15 +61,111 @@ customresourcedefinition.apiextensions.k8s.io/enterprisesearches.enterprisesearc
 customresourcedefinition.apiextensions.k8s.io/kibanas.kibana.k8s.elastic.co created
 customresourcedefinition.apiextensions.k8s.io/logstashes.logstash.k8s.elastic.co created
 ```
-次に、OperatorとRBACルールをインストールします。
+オペレーターをデプロイします。
 ```bash
 kubectl apply -f https://download.elastic.co/downloads/eck/2.13.0/operator.yaml
 ```
-## 1.2 ElasticSearchとKibanaのインストール
+## 1.2 ElasticSearchのインストール
 
-## 1.3 Ingress Controllerを使用してKibanaを公開する
+次に、ElasticSearchを構築します。ここでは`default`ノードを三つ作成し、各ノードに300GiのLinode Block Storageを与えています。名前は`logging-dashboard`とします。
+:::message
+上記の`default`ノードはElasticSearchのアプリケーション内ノードで、Kubernetesクラスタのノードではありません。Kubernetes内ではpodとして扱われています。
+:::
+Linode Block Storage以外のストレージサービスを使用している場合は適宜`storageClassName`を変更してください。テスト用途にローカルボリュームを使用したい場合は`local-path-provisioner`を使用できます。
+@[card](https://github.com/rancher/local-path-provisioner)
 
-先ほど`kubectl port-forwarding`でKibanaの動作確認ができましたが、現在の状態では外部からアクセスできません。というのも、`kubectl get svc`で確認すると、
+```yaml:elasticsearch.yaml
+apiVersion: elasticsearch.k8s.elastic.co/v1
+kind: Elasticsearch
+metadata:
+  name: logging-dashboard
+spec:
+  version: 8.14.3
+  nodeSets:
+  - name: default
+    count: 3
+    config:
+      node.roles: ["master", "data"]
+      node.store.allow_mmap: false
+    volumeClaimTemplates:
+    - metadata:
+        name: elasticsearch-data # Do not change this name unless you set up a volume mount for the data path.
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 300Gi
+        storageClassName: linode-block-storage-retain
+```
+ファイルを作成したらapplyします。
+```bash
+kubectl apply -f elasticsearch.yaml
+```
+ヘルス状態を確かめます。
+```
+$ kubectl get elasticsearch
+
+NAME                HEALTH   NODES   VERSION   PHASE   AGE
+logging-dashboard   green    3       8.14.3    Ready   90s
+```
+
+
+問題なく動作しているようです。
+## 1.3 Kibanaのインストール
+以下のファイルでKibanaを構築します。注意点として、`metadata.name`と`elasticsearchRef`の値はelasticsearchの構成ファイルの`metadata.name`の値と同じに設定してください。`spec.count`で同時に出現するKibanaのpodの数を指定できます。
+```yaml:kibana.yaml
+apiVersion: kibana.k8s.elastic.co/v1
+kind: Kibana
+metadata:
+  name: logging-dashboard
+spec:
+  version: 8.14.3
+  count: 2
+  elasticsearchRef:
+    name: logging-dashboard
+```
+ファイルをapplyします。
+```bash
+kubectl apply -f kibana.yaml
+```
+ヘルス状態を確かめます。
+```
+$ kubectl get kibana
+
+NAME                HEALTH   NODES   VERSION   AGE
+logging-dashboard   green    1       8.14.3    90s
+```
+
+インストールは特に問題なく完了したようです。試しに、KibanaのServiceを取得して`port-forwarding`で動作確認してみます。
+```
+$ kubectl get svc
+
+NAME                                 TYPE           CLUSTER-IP       EXTERNAL-IP     PORT(S)          AGE
+kubernetes                           ClusterIP      10.128.0.1       <none>          443/TCP          116d
+logging-dashboard-es-default         ClusterIP      None             <none>          9200/TCP         2d15h
+logging-dashboard-es-http            ClusterIP      10.128.5.221     <none>          9200/TCP         2d15h
+logging-dashboard-es-internal-http   ClusterIP      10.128.238.88    <none>          9200/TCP         2d15h
+logging-dashboard-es-transport       ClusterIP      None             <none>          9300/TCP         2d15h
+logging-dashboard-kb-http            ClusterIP      10.128.185.177   <none>          5601/TCP         2d15h
+```
+
+
+KibanaのServiceである`logging-dashboard-kb-http`が見つかりました。
+次のコマンドでKibanaに接続してみます。
+:::message
+注:kibanaのServiceの名称は`kibanaの構成ファイルに記述されているmetadata.nameの値`-kb-httpのような形式になっています。
+:::
+```
+kubectl port-forward service/logging-dashboard-kb-http 5601
+```
+ブラウザで開いてみます。
+@[card](https://localhost:5601)
+問題なく表示できました。
+![](/images/efk-on-separate-cluster/image.png)
+## 1.3 Ingressコントローラーを使用してKibanaを公開する
+
+先ほど`kubectl port-forwarding`でKibanaの動作確認ができましたが、現在の状態ではクラスタ外部からアクセスできません。というのも、再度`kubectl get svc`で確認すると
 ```
 NAME                                 TYPE           CLUSTER-IP       EXTERNAL-IP     PORT(S)          AGE
 logging-dashboard-es-default         ClusterIP      None             <none>          9200/TCP         41h
@@ -78,16 +174,17 @@ logging-dashboard-es-internal-http   ClusterIP      10.128.238.88    <none>     
 logging-dashboard-es-transport       ClusterIP      None             <none>          9300/TCP         41h
 logging-dashboard-kb-http            ClusterIP      10.128.185.177   <none>          5601/TCP         41h
 ```
-外部からアクセスしたいKibanaのServiceである`logging-dashboard-kb-http`はタイプがクラスタの内部通信に使われる`ClusterIP`で、`EXTERNAL-IP`が空欄になっていていることから公開IPアドレスが割り当てられていないことがわかります。
+外部からアクセスしたいKibanaのServiceである`logging-dashboard-kb-http`はタイプがクラスタの内部通信に使われる`ClusterIP`で、`EXTERNAL-IP`が空欄になっていていることから外部からアクセスできる公開IPアドレスが割り当てられていないことがわかります。
 
-このServiceの外部アクセスを可能するには`LoadBalancer`タイプのServiceを新たに作る手法もありますが、今回は`Ingress`および`Ingress-Controller`を用いて適切に外部トラフィックを内部Serviceにルーティングする方法を取ります。
+と同様に、ログ収集エージェントであるfluentdはKibanaではなくElasticSearchにログを送信するので、ElasticSearchのサービスも同様に公開する必要があります。新しく別々に`LoadBalancer`を割り当てる手法もありますが、この記事では`Ingress`および`Ingress-Controller`を用いて適切に外部トラフィックを該当の内部Serviceにルーティングする方法を取ります。
 
-同時に、cert-managerを利用してTLS証明書の発行および管理を自動的に行うシステムの構築を行います。一般的なWebサービスはHTTPSプロトコルを使用します。当然、Kibanaもその例外ではなく、必然的にTLS署名が必要となります。そこで署名や管理を自動で行えるcert-managerは必要不可欠ですし、この記事でも軽く使い方を説明します。
+同時に、cert-managerを利用してTLS証明書の発行および管理を自動的に行うシステムの構築を行います。一般的なWebサービスはHTTPSプロトコルを使用します。当然、Kibanaもその例外ではなく、必然的にTLS署名が必要となります。
 
-### 1.3.1 Ingress Controllerをインストールする
-`Ingress`のServiceを扱うにはIngress Controllerが必要です。Ingress Controllerは多数公開されていますが、この場合はIngress Nginx Controller(https://kubernetes.github.io/ingress-nginx/deploy/)を使用します。
+### 1.3.1 Ingressコントローラーをインストールする
+`Ingress`タイプのServiceを扱うにはIngressコントローラーが**必ず**必要です。Ingressコントローラーは多数公開されていますが、この記事ではIngress Nginx Controllerを使用します。
+@[card](https://kubernetes.github.io/ingress-nginx/deploy/)
 :::message
-ここではhelmを使用してインストールしていますが、他の方法でインストールすることも可能です。詳しくは公式ドキュメントをご参照ください。
+ここではhelmを使用してインストールしていますが、一般的なマニフェストを利用してインストールすることもできます。詳しくはingress-nginxの公式ドキュメントを参照してください。
 :::
 以下のコマンドでインストールします。
 ```
@@ -103,20 +200,17 @@ NAME                                 TYPE           CLUSTER-IP       EXTERNAL-IP
 ingress-nginx-controller             LoadBalancer   10.128.229.175   xx.xx.xxx.xx   80:30350/TCP,443:31867/TCP   43h
 ingress-nginx-controller-admission   ClusterIP      10.128.142.155   <none>         443/TCP                      43h
 ```
-`ingress-nginx-controller`の`EXTERNAL-IP`の値は後ほど使用します。
+動作を確認できました。
 
 ### 1.3.2 cert-managerとLet's EncryptでKibanaのTLS認証を行う
 
-CA機関によるTLS認証に必要な証明書の発行は高額な費用がかかる場合があります。
-
-ですが、現在はLet's Encryptが無料、オープンかつ自動化された証明書の発行サービスを提供しているので、cert-managerで自動的にLet's Encrypt(HTTP01 Challenge)による証明書の発行と期限切れの証明書の更新を行えるように設定します。
+Let's Encryptが無料、オープンかつ自動化された証明書の発行サービスを提供しているので、cert-managerで自動的にLet's Encrypt(HTTP01 Challenge)による証明書の発行と期限切れの証明書の更新を行えるように設定します。
 
 まずはcert-managerをインストールします。すでにインストールされている方は次のステップにお進みください。
-
+@[card](https://cert-manager.io/docs/installation/)
 :::message
-ここではhelmを使用してインストールしていますが、`yaml`マニフェストを利用してインストールすることもできます。詳しくはcert-managerの公式ドキュメントを参照してください。
+ここではhelmを使用してインストールしていますが、一般的なマニフェストを利用してインストールすることもできます。詳しくはcert-managerの公式ドキュメントを参照してください。
 :::
-
 ```bash
 $ helm repo add jetstack https://charts.jetstack.io --force-update
 >> "jetstack" has been added to your repositories
@@ -132,16 +226,33 @@ $ helm install \
   --set crds.enabled=true
 >> cert-manager v1.15.1 has been deployed successfully!
 ```
-次に、`ClusterIssuer`を作成します。深入りはしませんが、cert-managerのIssuerには二種類あり、ここではクラスタレベルのスコープで使用できるClusterIssuerを使います。
+次に、`ClusterIssuer`を作成します。cert-managerのIssuerには二種類あり、ここではクラスタレベルのスコープで使用できるClusterIssuerを使います。
 
+```yaml:clusterissuer.yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    email: youremail@youremail.com
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-prod
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+          serviceType: ClusterIP
+```
 注意すべきパラメーターを簡単に説明します。
 - `acme.email`:自分のメールアドレスを記入してください。
-- `acme.server`:使用するacmeのサーバー。ここではLet's EncryptのProd(Production)サーバーを使用していますが、リクエスト回数に制限があるので、テスト環境ではLet's EncryptのTest環境(https://acme-staging-v02.api.letsencrypt.org/directory)をお勧めします。
+- `acme.server`:使用するacmeのサーバー。ここではLet's EncryptのProd(Production)サーバーを使用していますが、リクエスト回数に制限があるので、テスト環境ではLet's Encryptのstaging環境(https://acme-staging-v02.api.letsencrypt.org/directory)をお勧めします。
 
 :::message alert
-Let's Encryptのテスト環境にて発行される証明書は発行側が完全な情報を記述していないので正式に使用できません。あくまでテスト用としてご利用ください。
+Let's Encryptのstaging環境にて発行される証明書は発行側が完全な情報を記述していないので正式に使用できません。あくまでテスト用としてご利用ください。
 :::
-- `acme.solvers[0].http01.ingress.class`:使用しているIngress Controllerの値に置き換えてください。ここでは`nginx`になります。これでcert-managerはport 80にingressを配置し、acmeサーバーにHTTP-01認証をさせることができます。
+- `acme.solvers[0].http01.ingress.class`:使用しているIngressコントローラーの値に置き換えてください。この記事では`nginx`になります。これでcert-managerはport 80にingressを配置し、acmeサーバーにHTTP-01認証をさせることができます。
 
 パラメーターの調整が終わりましたらapplyしましょう。
 ```bash
@@ -151,18 +262,50 @@ kubectl apply -f clusterissuer.yaml
 ```bash
 $ kubectl get ClusterIssuer
 
->>letsencrypt-prod   True    42h
+NAME               READY   AGE
+letsencrypt-prod   True    13m
 ```
 
+
 # KibanaをIngressで公開する
-最後の手順です。以下のファイルで`ingress`を作成します。
+以下のファイルで`ingress`Serviceを作成します。
+```yaml:ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+  name: kibana
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: your domain
+    http:
+      paths:
+      - backend:
+          service:
+            name: logging-dashboard-kb-http
+            port:
+              number: 5601
+        path: /
+        pathType: ImplementationSpecific
+      - path: /elasticsearch
+        backend:
+          serviceName: logging-dashboard-es-http 
+          servicePort: 9200
+  tls:
+  - hosts:
+    - your domain
+    secretName: your domain
+```
 
 注意すべきパラメーターを以下に説明します。
-- `your domain`:ドメイン名を入力してください。もし手持ちのドメインがありませんでしたら、テスト用途に`nip.io`を利用できます。先ほど取得した`ingress-nginx-controller`Serviceの`External-IP`の値を`xx.xx.xxx.xx.nip.io`のように当てはめることでDNSルーティングができます。詳しくは https://nip.io/ を参照してください。
-- `your ingress controller`:使用しているIngress Controllerのclass nameに置き換えてください。ここでは`nginx`です・
+- `your domain`:ドメイン名を入力してください。もし手持ちのドメインがありませんでしたら、テスト用途に`nip.io`を利用できます。先ほど取得した`ingress-nginx-controller`Serviceの`External-IP`の値を`your domain`のように当てはめることでDNSルーティングができます。詳しくは https://nip.io/ を参照してください。
+- `your Ingressコントローラー`:使用しているIngressコントローラーのclass nameに置き換えてください。ここでは`nginx`です・
 
 # 2.収集側の作業
-## 2.1 `namespace`を作成する
+## 2.1 namespaceを作成する
 他のプロダクトが`default`にデプロイされているため、namespaceを`default`と分けて`fluent`で作成します。
 ``` yaml:fluent-namespace.yaml
 kind: Namespace
@@ -184,7 +327,6 @@ fluentdはデフォルトで`var/log/containers/`以下のファイルに対し�
 2020-10-10T00:10:00.333333333Z stdout F Hello Fluentd
 ```
 のようになっていたら、以下を参考にfluentdの設定を変更してください。もしjson形式でしたらこの手順は必要ありません。
-
 `ConfigMap`用のマニフェストファイルを作成します。
 ```yaml:fluent-configmap.yaml
 apiVersion: v1
@@ -199,25 +341,34 @@ applyします。
 ```
 kubectl apply -f fluent-configmap.yaml
 ```
-:::message
-追記：この`ConfigMap`が変更しているのは後ほど使用するfluentd-kubernetes-daemonset(https://github.com/fluent/fluentd-kubernetes-daemonset)イメージの`/fluentd/etc/`以下にある`tail_container_parse.conf`です。こちら(https://github.com/fluent/fluentd-kubernetes-daemonset/tree/master/docker-image/v1.17/debian-elasticsearch8/conf)ですべての設定ファイルを閲覧できます。
-:::
 
-## 2.3 Elastic Stackクラスタの情報を記載するSecretを作成する
+## 2.3  Elastic Stackクラスタの情報を記載するSecretを作成する
+
 fluentdがElasticSearchにログを送信する際にはElasticSearchのアカウントとパスワードをが必要になります。パスワードを直接fluentdの設定ファイルに記述するのは安全性と柔軟性に欠けますので、ここではSecretを使用して先ほど取得したパスワードとアカウントを記述します。
 
 まず、OpaqueタイプのSecretに格納される情報は`base64`エンコードされている必要がありますので、先にアカウントとパスワードを以下のコマンドで`base64`エンコードしましょう。
 ```bash
 echo -n 'fluentd' | base64
 ```
-```bash
+```bas2
 echo -n 'mypassword' | base64
 ```
 
 :::message
 注：`''`は取り外さないでください。
 :::
-次に、先ほどのコマンドで出力されたアカウントとパスワードのエンコード結果を、以下のファイルの該当項目に入力します。
+次に、先ほどのコマンドで出力されたユーザー名とパスワードのエンコード結果を、以下のファイルの該当項目に入力します。
+```yaml:fluent-secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: elastic-secret
+  namespace: fluent
+type: Opaque
+data:
+  username: 
+  password: 
+```
 
 applyします。
 ```bash
@@ -225,7 +376,7 @@ kubectl apply -f fluent-secret.yaml
 ```
 
 ## 2.4 fluentdをデプロイする
-いよいよ大詰めです。以下に変更すべき設定の一覧を紹介します。
+いよいよ大詰めです。以下に変更すべきの`metadata.name`の値と同じに設定`spec.count`はkibanaの同時に出現するpodの数を指定できます。してください。の一覧を紹介します。
 - `containers.env.name: FLUENT_ELASTICSEARCH_HOST`
   - 先ほど取得したElasticsearchのEXTERNAL-IPを記入してください。
 - 
@@ -233,7 +384,7 @@ kubectl apply -f fluent-secret.yaml
 ```yaml:fluent.yaml
 ---
 apiVersion: v1
-kind: ServiceAccount
+kind: ServiceAccoun2
 metadata:
   name: fluentd
   namespace: fluent
@@ -252,7 +403,6 @@ rules:
   - get
   - list
   - watch
-
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -302,7 +452,7 @@ spec:
               fieldRef:
                 fieldPath: spec.nodeName
           - name:  FLUENT_ELASTICSEARCH_HOST
-            value: "45.79.244.31"
+            value: "yourelasticsearchhost"
           - name:  FLUENT_ELASTICSEARCH_PORT
             value: "9200"
           - name: FLUENT_ELASTICSEARCH_SCHEME
@@ -312,7 +462,7 @@ spec:
           # Option to configure elasticsearch plugin with self signed certs
           # ================================================================
           - name: FLUENT_ELASTICSEARCH_SSL_VERIFY
-            value: "false"
+            value: "true"
           # Option to configure elasticsearch plugin with tls
           # ================================================================
           - name: FLUENT_ELASTICSEARCH_SSL_VERSION
@@ -320,15 +470,19 @@ spec:
           # X-Pack Authentication
           # =====================
           - name: FLUENT_ELASTICSEARCH_USER
-            value: "elastic"
+            valueFrom:
+              secretKeyRef:
+                name: elastic-secret
+                key: username
           - name: FLUENT_ELASTICSEARCH_PASSWORD
-            value: "k29mg54NteJvmJsf"
+            valueFrom:
+              secretKeyRef:
+                name: elastic-secret
+                key: password
           - name: FLUENT_CONTAINER_TAIL_EXCLUDE_PATH
             value: /var/log/containers/fluent*
-          - name: FLUENT_CONTAINER_TAIL_PARSER_TYPE
-            value: /^(?<time>.+) (?<stream>stdout|stderr) [^ ]* (?<log>.*)$/
           - name: FLUENT_CONTAINER_TAIL_PATH
-            value: /var/log/containers/abconvert*.log
+            value: /var/log/containers/*.log
         resources:
           limits:
             memory: 200Mi
@@ -338,9 +492,9 @@ spec:
         volumeMounts:
         - name: varlog
           mountPath: /var/log
-        # - name: containers-conf-volume
-        #   mountPath: /fluentd/etc/kubernetes/containers.conf
-        #   subPath: containers.conf
+        - name: tail-container-parse-conf-volume
+          mountPath: /fluentd/etc/tail_container_parse.conf
+          subPath: tail_container_parse.conf
         # When actual pod logs in /var/lib/docker/containers, the following lines should be used.
         - name: dockercontainerlogdirectory
           mountPath: /var/lib/docker/containers
@@ -349,17 +503,11 @@ spec:
         # - name: dockercontainerlogdirectory
         #   mountPath: /var/log/pods
         #   readOnly: true
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: 45
       volumes:
-      # - name: containers-conf-volume
-      #   configMap:
-      #     name: containers-conf
-      # - name: nodejs-conf-volume
-      #   configMap:
-      #     name: nodejs-conf
-      # - name: tail-container-parse-conf-volume
-      #   configMap:
-      #     name: tail-container-parse-conf
+      - name: tail-container-parse-conf-volume
+        configMap:
+          name: tail-container-parse-conf
       - name: varlog
         hostPath:
           path: /var/log
