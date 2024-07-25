@@ -143,11 +143,11 @@ $ kubectl get svc
 
 NAME                                 TYPE           CLUSTER-IP       EXTERNAL-IP     PORT(S)          AGE
 kubernetes                           ClusterIP      10.128.0.1       <none>          443/TCP          116d
-logging-dashboard-es-default         ClusterIP      None             <none>          9200/TCP         2d15h
-logging-dashboard-es-http            ClusterIP      10.128.5.221     <none>          9200/TCP         2d15h
-logging-dashboard-es-internal-http   ClusterIP      10.128.238.88    <none>          9200/TCP         2d15h
-logging-dashboard-es-transport       ClusterIP      None             <none>          9300/TCP         2d15h
-logging-dashboard-kb-http            ClusterIP      10.128.185.177   <none>          5601/TCP         2d15h
+logging-dashboard-es-default         ClusterIP      None             <none>          9200/TCP         60m
+logging-dashboard-es-http            ClusterIP      10.128.5.221     <none>          9200/TCP         60m
+logging-dashboard-es-internal-http   ClusterIP      10.128.238.88    <none>          9200/TCP         60m
+logging-dashboard-es-transport       ClusterIP      None             <none>          9300/TCP         60m
+logging-dashboard-kb-http            ClusterIP      10.128.185.177   <none>          5601/TCP         60m
 ```
 
 
@@ -200,7 +200,7 @@ NAME                                 TYPE           CLUSTER-IP       EXTERNAL-IP
 ingress-nginx-controller             LoadBalancer   10.128.229.175   xx.xx.xxx.xx   80:30350/TCP,443:31867/TCP   43h
 ingress-nginx-controller-admission   ClusterIP      10.128.142.155   <none>         443/TCP                      43h
 ```
-動作を確認できました。
+動作確認できました。
 
 ### 1.3.2 cert-managerとLet's EncryptでKibanaのTLS認証を行う
 
